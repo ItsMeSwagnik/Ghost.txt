@@ -30,8 +30,16 @@ interface CooldownRoom {
   cooldownUntil: number
 }
 
-const activeRooms = new Map<string, Room>()
-const cooldownRooms = new Map<string, CooldownRoom>()
+// Use global to survive Next.js HMR module re-evaluation in dev
+declare global {
+  // eslint-disable-next-line no-var
+  var __activeRooms: Map<string, Room> | undefined
+  // eslint-disable-next-line no-var
+  var __cooldownRooms: Map<string, CooldownRoom> | undefined
+}
+
+const activeRooms: Map<string, Room> = global.__activeRooms ?? (global.__activeRooms = new Map())
+const cooldownRooms: Map<string, CooldownRoom> = global.__cooldownRooms ?? (global.__cooldownRooms = new Map())
 
 const COOLDOWN_DURATION = 5 * 60 * 1000 // 5 minutes in milliseconds
 

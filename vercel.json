@@ -1,8 +1,25 @@
 {
   "regions": ["iad1"],
   "functions": {
-    "app/api/**": {
-      "maxDuration": 10
+    "app/api/room/route.ts": {
+      "maxDuration": 10,
+      "memory": 256
+    },
+    "app/api/message/route.ts": {
+      "maxDuration": 10,
+      "memory": 256
+    },
+    "app/api/pusher/auth/route.ts": {
+      "maxDuration": 10,
+      "memory": 256
+    },
+    "app/api/typing/route.ts": {
+      "maxDuration": 10,
+      "memory": 256
+    },
+    "app/api/screenshot/route.ts": {
+      "maxDuration": 10,
+      "memory": 256
     }
   }
 }
