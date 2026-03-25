@@ -107,7 +107,8 @@ export default function RoomPage({ params }: PageProps) {
     const savedUserId = sessionStorage.getItem("chat-user-id")
     
     if (!savedNickname) {
-      // No nickname, redirect to home
+      // Save the full URL (including hash) so we can return after nickname entry
+      sessionStorage.setItem("redirect-after-nickname", window.location.pathname + window.location.hash)
       router.push("/")
       return
     }
