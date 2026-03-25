@@ -61,15 +61,7 @@ function HomePageContent() {
   // Load nickname from session storage
   useEffect(() => {
     const savedNickname = sessionStorage.getItem("chat-nickname")
-    if (savedNickname) {
-      setNickname(savedNickname)
-      // If there's a pending redirect (came from a share URL), go there now
-      const redirect = sessionStorage.getItem("redirect-after-nickname")
-      if (redirect) {
-        sessionStorage.removeItem("redirect-after-nickname")
-        router.push(redirect)
-      }
-    }
+    if (savedNickname) setNickname(savedNickname)
   }, [])
 
   // Save nickname to session storage and return userId
@@ -218,14 +210,6 @@ function HomePageContent() {
       }
 
       saveNickname(nickname.trim())
-
-      // Check for a pending redirect (e.g. came from a share URL)
-      const redirect = sessionStorage.getItem("redirect-after-nickname")
-      if (redirect) {
-        sessionStorage.removeItem("redirect-after-nickname")
-        router.push(redirect)
-        return
-      }
 
       // Navigate to room - the room page will handle the join request
       router.push(`/room/${joinRoomId.trim()}`)
