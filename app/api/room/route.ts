@@ -146,6 +146,7 @@ export async function POST(request: NextRequest) {
     }
     
     if (action === "approve") {
+      const { encryptionKey } = body
       if (!roomId || !userId || !targetUserId) {
         return NextResponse.json(
           { error: "Room ID, user ID, and target user ID are required" },
@@ -170,16 +171,15 @@ export async function POST(request: NextRequest) {
       }
       
       if (result === 'user_not_pending') {
-        return NextResponse.json(
-          { error: "User is not in pending list" },
-          { status: 400 }
-        )
+        // Already approved or removed — treat as success
+        return NextResponse.json({ success: true })
       }
       
       // Notify the approved user
       console.log("[API/room] Notifying approved user")
       await pusherServer.trigger(`private-user-${targetUserId}`, 'join-approved', {
         roomId,
+        encryptionKey: encryptionKey || null,
       })
       
       // Notify everyone in the room about the approval
@@ -282,6 +282,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true })
     }
     
+    if (action === "debug") {
+      const { getRoomDebugInfo } = await import("@/lib/room-manager")
+      return NextResponse.json(getRoomDebugInfo())
+    }
+
     if (action === "check") {
       if (!roomId || !isValidRoomId(roomId)) {
         return NextResponse.json(

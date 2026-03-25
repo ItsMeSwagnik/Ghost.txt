@@ -27,11 +27,21 @@ export default function RoomPage({ params }: PageProps) {
     try {
       console.log("[RoomPage] Checking room status")
       // First check if user is already a member or admin
-      const infoResponse = await fetch("/api/room", {
+      let infoResponse = await fetch("/api/room", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "info", roomId, userId: uid }),
       })
+
+      // Retry once after a short delay (handles Next.js dev HMR module reload)
+      if (infoResponse.status === 404) {
+        await new Promise(r => setTimeout(r, 500))
+        infoResponse = await fetch("/api/room", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "info", roomId, userId: uid }),
+        })
+      }
       
       if (!infoResponse.ok) {
         if (infoResponse.status === 404) {
@@ -127,17 +137,19 @@ export default function RoomPage({ params }: PageProps) {
     
     if (hash && hash.length > 0) {
       setEncryptionKey(hash)
-      // Check room and request join
-      checkAndRequestJoin(uid, savedNickname)
-    } else {
-      setRoomStatus('need_key')
     }
+    // Always proceed to check/request join regardless of key
+    checkAndRequestJoin(uid, savedNickname)
   }, [router, roomId, checkAndRequestJoin])
 
   // Handle approval callback
-  const handleApproved = () => {
+  const handleApproved = useCallback((key: string | null) => {
+    if (key) {
+      window.history.replaceState(null, "", `#${key}`)
+      setEncryptionKey(key)
+    }
     setRoomStatus('approved')
-  }
+  }, [])
 
   if (roomStatus === 'loading') {
     return (
@@ -171,28 +183,6 @@ export default function RoomPage({ params }: PageProps) {
     return null
   }
 
-  // If no encryption key in URL, prompt user to enter it
-  if (roomStatus === 'need_key' || !encryptionKey) {
-    return (
-      <EncryptionKeyPrompt 
-        roomId={roomId}
-        onKeySubmit={(key) => {
-          // Add key to URL hash for future reference
-          window.history.replaceState(null, "", `#${key}`)
-          setEncryptionKey(key)
-          
-          // If admin, they're already approved
-          if (isAdmin) {
-            setRoomStatus('approved')
-          } else {
-            // Request to join for non-admins
-            checkAndRequestJoin(userId, nickname)
-          }
-        }}
-      />
-    )
-  }
-
   // Waiting room for pending users
   if (roomStatus === 'pending') {
     return (
@@ -203,6 +193,31 @@ export default function RoomPage({ params }: PageProps) {
         encryptionKey={encryptionKey}
         onApproved={handleApproved}
       />
+    )
+  }
+
+  // Only admins who lost their key need to re-enter it
+  if (!encryptionKey && isAdmin) {
+    return (
+      <EncryptionKeyPrompt 
+        roomId={roomId}
+        onKeySubmit={(key) => {
+          window.history.replaceState(null, "", `#${key}`)
+          setEncryptionKey(key)
+        }}
+      />
+    )
+  }
+
+  // Non-admin approved without key yet — wait for key from approval event
+  if (!encryptionKey) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+          <p className="text-muted-foreground">Entering secure room...</p>
+        </div>
+      </div>
     )
   }
 

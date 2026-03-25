@@ -38,8 +38,11 @@ declare global {
   var __cooldownRooms: Map<string, CooldownRoom> | undefined
 }
 
-const activeRooms: Map<string, Room> = global.__activeRooms ?? (global.__activeRooms = new Map())
-const cooldownRooms: Map<string, CooldownRoom> = global.__cooldownRooms ?? (global.__cooldownRooms = new Map())
+if (!global.__activeRooms) global.__activeRooms = new Map()
+if (!global.__cooldownRooms) global.__cooldownRooms = new Map()
+
+const activeRooms: Map<string, Room> = global.__activeRooms
+const cooldownRooms: Map<string, CooldownRoom> = global.__cooldownRooms
 
 const COOLDOWN_DURATION = 5 * 60 * 1000 // 5 minutes in milliseconds
 
@@ -325,4 +328,13 @@ export function getCooldownRemaining(roomId: string): number {
     return 0
   }
   return Math.max(0, Math.ceil((cooldown.cooldownUntil - Date.now()) / 1000))
+}
+
+// Debug: dump all room state
+export function getRoomDebugInfo() {
+  return {
+    activeRoomIds: Array.from(activeRooms.keys()),
+    cooldownRoomIds: Array.from(cooldownRooms.keys()),
+    globalActiveRoomIds: global.__activeRooms ? Array.from(global.__activeRooms.keys()) : null,
+  }
 }

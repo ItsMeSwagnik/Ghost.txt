@@ -209,7 +209,7 @@ export function ChatRoom({ roomId, encryptionKey, nickname, userId, isAdmin, adm
         console.log("[ChatRoom] New join request received")
         setPendingUsers((prev) => {
           if (prev.some(u => u.id === data.userId)) return prev
-          return [...prev, data]
+          return [...prev, { id: data.userId, nickname: data.nickname, requestedAt: data.requestedAt }]
         })
       }
     })
@@ -249,13 +249,9 @@ export function ChatRoom({ roomId, encryptionKey, nickname, userId, isAdmin, adm
       router.push("/?kicked=true")
     })
 
-    // Notify server when leaving
-    const handleLeave = async () => {
-      await fetch("/api/room", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "leave", roomId, userId }),
-      })
+    // Notify server when leaving (only on real page unload)
+    const handleLeave = () => {
+      navigator.sendBeacon("/api/room", JSON.stringify({ action: "leave", roomId, userId }))
     }
 
     window.addEventListener("beforeunload", handleLeave)
@@ -265,8 +261,7 @@ export function ChatRoom({ roomId, encryptionKey, nickname, userId, isAdmin, adm
       window.removeEventListener("beforeunload", handleLeave)
       pusher.unsubscribe(`presence-room-${roomId}`)
       pusher.unsubscribe(`private-user-${userId}`)
-      // Only notify server on real unmount, not Strict Mode cleanup
-      // Use a small delay so Strict Mode remount can cancel this
+      // Use a longer delay to distinguish Strict Mode double-mount from real unmount
       const roomIdCopy = roomId
       const userIdCopy = userId
       setTimeout(() => {
@@ -277,7 +272,7 @@ export function ChatRoom({ roomId, encryptionKey, nickname, userId, isAdmin, adm
             body: JSON.stringify({ action: "leave", roomId: roomIdCopy, userId: userIdCopy }),
           }).catch(() => {})
         }
-      }, 100)
+      }, 2000)
     }
   }, [roomId, encryptionKey, userId, nickname, isAdmin, router])
 
@@ -362,7 +357,7 @@ export function ChatRoom({ roomId, encryptionKey, nickname, userId, isAdmin, adm
     await fetch("/api/room", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "approve", roomId, userId, targetUserId }),
+      body: JSON.stringify({ action: "approve", roomId, userId, targetUserId, encryptionKey }),
     })
     setPendingUsers((prev) => prev.filter(u => u.id !== targetUserId))
   }

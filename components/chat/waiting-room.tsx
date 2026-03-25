@@ -11,8 +11,8 @@ interface WaitingRoomProps {
   roomId: string
   userId: string
   nickname: string
-  encryptionKey: string
-  onApproved: () => void
+  encryptionKey: string | null
+  onApproved: (key: string | null) => void
 }
 
 export function WaitingRoom({ roomId, userId, nickname, encryptionKey, onApproved }: WaitingRoomProps) {
@@ -54,39 +54,54 @@ export function WaitingRoom({ roomId, userId, nickname, encryptionKey, onApprove
     return () => clearInterval(interval)
   }, [])
 
+  const onApprovedRef = useRef(onApproved)
+  useEffect(() => { onApprovedRef.current = onApproved })
+
   // Listen for approval/rejection
   useEffect(() => {
-    const pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY!, {
-      cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER!,
-      authEndpoint: "/api/pusher/auth",
-      auth: {
-        headers: {
-          "x-user-id": userId,
-          "x-nickname": nickname,
+    let active = true
+    let pusher: Pusher | null = null
+
+    // Defer connection slightly so Strict Mode double-invoke cleanup
+    // of the first run finishes before the second run connects
+    const timer = setTimeout(() => {
+      if (!active) return
+
+      pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY!, {
+        cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER!,
+        authEndpoint: "/api/pusher/auth",
+        auth: {
+          headers: {
+            "x-user-id": userId,
+            "x-nickname": nickname,
+          },
         },
-      },
-    })
+      })
 
-    const privateChannel = pusher.subscribe(`private-user-${userId}`)
+      const privateChannel = pusher.subscribe(`private-user-${userId}`)
 
-    privateChannel.bind('join-approved', () => {
-      console.log("[WaitingRoom] Join approved — entering room")
-      setStatus('approved')
-      setTimeout(() => {
-        onApproved()
-      }, 1000)
-    })
+      privateChannel.bind('join-approved', (data: { encryptionKey?: string | null }) => {
+        if (!active) return
+        console.log("[WaitingRoom] Join approved — entering room")
+        setStatus('approved')
+        setTimeout(() => {
+          onApprovedRef.current(data?.encryptionKey ?? null)
+        }, 1000)
+      })
 
-    privateChannel.bind('join-rejected', () => {
-      console.warn("[WaitingRoom] Join request was rejected")
-      setStatus('rejected')
-    })
+      privateChannel.bind('join-rejected', () => {
+        if (!active) return
+        console.warn("[WaitingRoom] Join request was rejected")
+        setStatus('rejected')
+      })
+    }, 100)
 
     return () => {
-      pusher.unsubscribe(`private-user-${userId}`)
-      pusher.disconnect()
+      active = false
+      clearTimeout(timer)
+      pusher?.disconnect()
     }
-  }, [userId, nickname, onApproved])
+  }, [userId, nickname])
 
   const handleCancel = async () => {
     await fetch("/api/room", {
