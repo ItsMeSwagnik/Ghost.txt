@@ -3,23 +3,28 @@
   "functions": {
     "app/api/room/route.ts": {
       "maxDuration": 10,
-      "memory": 256
+      "memory": 256,
+      "regions": ["iad1"]
     },
     "app/api/message/route.ts": {
       "maxDuration": 10,
-      "memory": 256
+      "memory": 256,
+      "regions": ["iad1"]
     },
     "app/api/pusher/auth/route.ts": {
       "maxDuration": 10,
-      "memory": 256
+      "memory": 256,
+      "regions": ["iad1"]
     },
     "app/api/typing/route.ts": {
       "maxDuration": 10,
-      "memory": 256
+      "memory": 256,
+      "regions": ["iad1"]
     },
     "app/api/screenshot/route.ts": {
       "maxDuration": 10,
-      "memory": 256
+      "memory": 256,
+      "regions": ["iad1"]
     }
   }
 }

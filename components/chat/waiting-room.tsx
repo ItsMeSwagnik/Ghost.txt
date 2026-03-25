@@ -99,7 +99,9 @@ export function WaitingRoom({ roomId, userId, nickname, encryptionKey, onApprove
     return () => {
       active = false
       clearTimeout(timer)
-      pusher?.disconnect()
+      if (pusher && pusher.connection.state !== 'disconnected') {
+        pusher.disconnect()
+      }
     }
   }, [userId, nickname])
 
