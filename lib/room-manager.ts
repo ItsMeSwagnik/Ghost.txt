@@ -1,340 +1,200 @@
-// In-memory room management (no persistence)
-// NOTE: This works on Vercel only because vercel.json pins all functions to a
-// single region (iad1). If you ever remove that constraint or scale to multiple
-// regions, replace this with a Redis store (e.g. Upstash) for shared state.
+import { neon } from "@neondatabase/serverless"
 
-interface RoomUser {
-  id: string
-  nickname: string
-  joinedAt: number
+const sql = neon(process.env.DATABASE_URL!)
+
+// Initialize tables on first use
+let initialized = false
+async function ensureSchema() {
+  if (initialized) return
+  await sql`
+    CREATE TABLE IF NOT EXISTS rooms (
+      id TEXT PRIMARY KEY,
+      admin_id TEXT NOT NULL,
+      admin_nickname TEXT NOT NULL,
+      created_at BIGINT NOT NULL,
+      last_activity BIGINT NOT NULL
+    )
+  `
+  await sql`
+    CREATE TABLE IF NOT EXISTS room_users (
+      room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      nickname TEXT NOT NULL,
+      joined_at BIGINT NOT NULL,
+      PRIMARY KEY (room_id, user_id)
+    )
+  `
+  await sql`
+    CREATE TABLE IF NOT EXISTS room_pending (
+      room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      nickname TEXT NOT NULL,
+      requested_at BIGINT NOT NULL,
+      PRIMARY KEY (room_id, user_id)
+    )
+  `
+  await sql`
+    CREATE TABLE IF NOT EXISTS room_cooldowns (
+      id TEXT PRIMARY KEY,
+      cooldown_until BIGINT NOT NULL
+    )
+  `
+  initialized = true
 }
 
-interface PendingUser {
-  id: string
-  nickname: string
-  requestedAt: number
+const COOLDOWN_MS = 5 * 60 * 1000
+
+export async function isRoomIdAvailable(roomId: string): Promise<boolean> {
+  await ensureSchema()
+  const [roomRow] = await sql`SELECT id FROM rooms WHERE id = ${roomId}`
+  if (roomRow) return false
+  const [cooldown] = await sql`SELECT cooldown_until FROM room_cooldowns WHERE id = ${roomId}`
+  if (cooldown && Date.now() < Number(cooldown.cooldown_until)) return false
+  return true
 }
 
-interface Room {
-  id: string
-  adminId: string
-  adminNickname: string
-  users: Map<string, RoomUser>
-  pendingUsers: Map<string, PendingUser>
-  createdAt: number
-  lastActivity: number
-}
-
-interface CooldownRoom {
-  id: string
-  cooldownUntil: number
-}
-
-// Use global to survive Next.js HMR module re-evaluation in dev
-declare global {
-  // eslint-disable-next-line no-var
-  var __activeRooms: Map<string, Room> | undefined
-  // eslint-disable-next-line no-var
-  var __cooldownRooms: Map<string, CooldownRoom> | undefined
-}
-
-if (!global.__activeRooms) global.__activeRooms = new Map()
-if (!global.__cooldownRooms) global.__cooldownRooms = new Map()
-
-const activeRooms: Map<string, Room> = global.__activeRooms
-const cooldownRooms: Map<string, CooldownRoom> = global.__cooldownRooms
-
-const COOLDOWN_DURATION = 5 * 60 * 1000 // 5 minutes in milliseconds
-
-// Clean up expired cooldowns periodically
-function cleanupCooldowns() {
+export async function createRoom(roomId: string, adminId: string, adminNickname: string): Promise<boolean> {
+  await ensureSchema()
+  if (!(await isRoomIdAvailable(roomId))) return false
   const now = Date.now()
-  for (const [roomId, room] of cooldownRooms.entries()) {
-    if (now >= room.cooldownUntil) {
-      cooldownRooms.delete(roomId)
-    }
-  }
-}
-
-// Check if a room ID is available
-export function isRoomIdAvailable(roomId: string): boolean {
-  cleanupCooldowns()
-  
-  // Check if room is active
-  if (activeRooms.has(roomId)) {
-    return false
-  }
-  
-  // Check if room is in cooldown
-  if (cooldownRooms.has(roomId)) {
-    const cooldown = cooldownRooms.get(roomId)!
-    if (Date.now() < cooldown.cooldownUntil) {
-      return false
-    }
-    cooldownRooms.delete(roomId)
-  }
-  
+  await sql`INSERT INTO rooms (id, admin_id, admin_nickname, created_at, last_activity) VALUES (${roomId}, ${adminId}, ${adminNickname}, ${now}, ${now})`
+  await sql`INSERT INTO room_users (room_id, user_id, nickname, joined_at) VALUES (${roomId}, ${adminId}, ${adminNickname}, ${now})`
+  // Clear any stale cooldown
+  await sql`DELETE FROM room_cooldowns WHERE id = ${roomId}`
   return true
 }
 
-// Create a new room with admin
-export function createRoom(roomId: string, adminId: string, adminNickname: string): boolean {
-  if (!isRoomIdAvailable(roomId)) {
-    console.warn("[RoomManager] createRoom failed — room ID not available")
-    return false
-  }
-  
-  console.log("[RoomManager] Room created")
-  
-  activeRooms.set(roomId, {
-    id: roomId,
-    adminId,
-    adminNickname,
-    users: new Map([[adminId, { id: adminId, nickname: adminNickname, joinedAt: Date.now() }]]),
-    pendingUsers: new Map(),
-    createdAt: Date.now(),
-    lastActivity: Date.now(),
-  })
-  
-  return true
-}
-
-// Request to join a room (goes to pending)
-export function requestJoinRoom(roomId: string, userId: string, nickname: string): 'pending' | 'not_found' | 'already_member' | 'already_pending' {
-  const room = activeRooms.get(roomId)
-  if (!room) {
-    console.warn("[RoomManager] requestJoinRoom — room not found")
-    return 'not_found'
-  }
-  
-  if (room.users.has(userId)) {
-    console.log("[RoomManager] requestJoinRoom — user already member")
-    return 'already_member'
-  }
-  
-  if (room.pendingUsers.has(userId)) {
-    console.log("[RoomManager] requestJoinRoom — user already pending")
-    return 'already_pending'
-  }
-  
-  console.log("[RoomManager] Join request queued")
-  
-  room.pendingUsers.set(userId, {
-    id: userId,
-    nickname,
-    requestedAt: Date.now(),
-  })
-  room.lastActivity = Date.now()
-  
+export async function requestJoinRoom(roomId: string, userId: string, nickname: string): Promise<'pending' | 'not_found' | 'already_member' | 'already_pending'> {
+  await ensureSchema()
+  const [room] = await sql`SELECT id FROM rooms WHERE id = ${roomId}`
+  if (!room) return 'not_found'
+  const [member] = await sql`SELECT user_id FROM room_users WHERE room_id = ${roomId} AND user_id = ${userId}`
+  if (member) return 'already_member'
+  const [pending] = await sql`SELECT user_id FROM room_pending WHERE room_id = ${roomId} AND user_id = ${userId}`
+  if (pending) return 'already_pending'
+  await sql`INSERT INTO room_pending (room_id, user_id, nickname, requested_at) VALUES (${roomId}, ${userId}, ${nickname}, ${Date.now()})`
+  await sql`UPDATE rooms SET last_activity = ${Date.now()} WHERE id = ${roomId}`
   return 'pending'
 }
 
-// Admin approves a join request
-export function approveJoinRequest(roomId: string, adminId: string, userId: string): 'approved' | 'not_admin' | 'not_found' | 'user_not_pending' {
-  const room = activeRooms.get(roomId)
-  if (!room) {
-    console.warn("[RoomManager] approveJoinRequest — room not found")
-    return 'not_found'
-  }
-  
-  if (room.adminId !== adminId) {
-    console.warn("[RoomManager] approveJoinRequest — unauthorized: not admin")
-    return 'not_admin'
-  }
-  
-  const pendingUser = room.pendingUsers.get(userId)
-  if (!pendingUser) {
-    console.warn("[RoomManager] approveJoinRequest — user not in pending list")
-    return 'user_not_pending'
-  }
-  
-  console.log("[RoomManager] Join request approved")
-  
-  // Move from pending to users
-  room.users.set(userId, {
-    id: userId,
-    nickname: pendingUser.nickname,
-    joinedAt: Date.now(),
-  })
-  room.pendingUsers.delete(userId)
-  room.lastActivity = Date.now()
-  
+export async function approveJoinRequest(roomId: string, adminId: string, userId: string): Promise<'approved' | 'not_admin' | 'not_found' | 'user_not_pending'> {
+  await ensureSchema()
+  const [room] = await sql`SELECT admin_id FROM rooms WHERE id = ${roomId}`
+  if (!room) return 'not_found'
+  if (room.admin_id !== adminId) return 'not_admin'
+  const [pending] = await sql`SELECT nickname FROM room_pending WHERE room_id = ${roomId} AND user_id = ${userId}`
+  if (!pending) return 'user_not_pending'
+  const now = Date.now()
+  await sql`INSERT INTO room_users (room_id, user_id, nickname, joined_at) VALUES (${roomId}, ${userId}, ${pending.nickname}, ${now}) ON CONFLICT DO NOTHING`
+  await sql`DELETE FROM room_pending WHERE room_id = ${roomId} AND user_id = ${userId}`
+  await sql`UPDATE rooms SET last_activity = ${now} WHERE id = ${roomId}`
   return 'approved'
 }
 
-// Admin rejects a join request
-export function rejectJoinRequest(roomId: string, adminId: string, userId: string): 'rejected' | 'not_admin' | 'not_found' | 'user_not_pending' {
-  const room = activeRooms.get(roomId)
-  if (!room) {
-    console.warn("[RoomManager] rejectJoinRequest — room not found")
-    return 'not_found'
-  }
-  
-  if (room.adminId !== adminId) {
-    console.warn("[RoomManager] rejectJoinRequest — unauthorized: not admin")
-    return 'not_admin'
-  }
-  
-  if (!room.pendingUsers.has(userId)) {
-    console.warn("[RoomManager] rejectJoinRequest — user not in pending list")
-    return 'user_not_pending'
-  }
-  
-  console.log("[RoomManager] Join request rejected")
-  
-  room.pendingUsers.delete(userId)
-  room.lastActivity = Date.now()
-  
+export async function rejectJoinRequest(roomId: string, adminId: string, userId: string): Promise<'rejected' | 'not_admin' | 'not_found' | 'user_not_pending'> {
+  await ensureSchema()
+  const [room] = await sql`SELECT admin_id FROM rooms WHERE id = ${roomId}`
+  if (!room) return 'not_found'
+  if (room.admin_id !== adminId) return 'not_admin'
+  const [pending] = await sql`SELECT user_id FROM room_pending WHERE room_id = ${roomId} AND user_id = ${userId}`
+  if (!pending) return 'user_not_pending'
+  await sql`DELETE FROM room_pending WHERE room_id = ${roomId} AND user_id = ${userId}`
+  await sql`UPDATE rooms SET last_activity = ${Date.now()} WHERE id = ${roomId}`
   return 'rejected'
 }
 
-// Admin kicks a user from the room
-export function kickUser(roomId: string, adminId: string, userId: string): 'kicked' | 'not_admin' | 'not_found' | 'user_not_found' | 'cannot_kick_admin' {
-  const room = activeRooms.get(roomId)
-  if (!room) {
-    console.warn("[RoomManager] kickUser — room not found")
-    return 'not_found'
-  }
-  
-  if (room.adminId !== adminId) {
-    console.warn("[RoomManager] kickUser — unauthorized: not admin")
-    return 'not_admin'
-  }
-  
-  if (userId === adminId) {
-    console.warn("[RoomManager] kickUser — cannot kick admin")
-    return 'cannot_kick_admin'
-  }
-  
-  if (!room.users.has(userId)) {
-    console.warn("[RoomManager] kickUser — target user not found in room")
-    return 'user_not_found'
-  }
-  
-  console.log("[RoomManager] User kicked from room")
-  
-  room.users.delete(userId)
-  room.lastActivity = Date.now()
-  
+export async function kickUser(roomId: string, adminId: string, userId: string): Promise<'kicked' | 'not_admin' | 'not_found' | 'user_not_found' | 'cannot_kick_admin'> {
+  await ensureSchema()
+  const [room] = await sql`SELECT admin_id FROM rooms WHERE id = ${roomId}`
+  if (!room) return 'not_found'
+  if (room.admin_id !== adminId) return 'not_admin'
+  if (userId === adminId) return 'cannot_kick_admin'
+  const [member] = await sql`SELECT user_id FROM room_users WHERE room_id = ${roomId} AND user_id = ${userId}`
+  if (!member) return 'user_not_found'
+  await sql`DELETE FROM room_users WHERE room_id = ${roomId} AND user_id = ${userId}`
+  await sql`UPDATE rooms SET last_activity = ${Date.now()} WHERE id = ${roomId}`
   return 'kicked'
 }
 
-// Direct join for admin (creator)
-export function joinRoomDirect(roomId: string, userId: string, nickname: string): boolean {
-  const room = activeRooms.get(roomId)
-  if (!room) {
-    return false
-  }
-  
-  room.users.set(userId, {
-    id: userId,
-    nickname,
-    joinedAt: Date.now(),
-  })
-  room.lastActivity = Date.now()
-  return true
-}
-
-// Leave a room
-export function leaveRoom(roomId: string, userId: string): void {
-  const room = activeRooms.get(roomId)
-  if (!room) {
-    console.warn("[RoomManager] leaveRoom — room not found")
-    return
-  }
-  
-  console.log("[RoomManager] User leaving room")
-  
-  room.users.delete(userId)
-  room.pendingUsers.delete(userId)
-  room.lastActivity = Date.now()
-  
-  // If room is empty, start cooldown
-  if (room.users.size === 0) {
-    console.log("[RoomManager] Room empty — starting 5-min cooldown")
-    activeRooms.delete(roomId)
-    cooldownRooms.set(roomId, {
-      id: roomId,
-      cooldownUntil: Date.now() + COOLDOWN_DURATION,
-    })
+export async function leaveRoom(roomId: string, userId: string): Promise<void> {
+  await ensureSchema()
+  await sql`DELETE FROM room_users WHERE room_id = ${roomId} AND user_id = ${userId}`
+  await sql`DELETE FROM room_pending WHERE room_id = ${roomId} AND user_id = ${userId}`
+  const [countRow] = await sql`SELECT COUNT(*) as count FROM room_users WHERE room_id = ${roomId}`
+  if (Number(countRow.count) === 0) {
+    await sql`DELETE FROM rooms WHERE id = ${roomId}`
+    await sql`INSERT INTO room_cooldowns (id, cooldown_until) VALUES (${roomId}, ${Date.now() + COOLDOWN_MS}) ON CONFLICT (id) DO UPDATE SET cooldown_until = ${Date.now() + COOLDOWN_MS}`
+  } else {
+    await sql`UPDATE rooms SET last_activity = ${Date.now()} WHERE id = ${roomId}`
   }
 }
 
-// Cancel pending request
-export function cancelJoinRequest(roomId: string, userId: string): void {
-  const room = activeRooms.get(roomId)
-  if (!room) {
-    return
-  }
-  room.pendingUsers.delete(userId)
+export async function cancelJoinRequest(roomId: string, userId: string): Promise<void> {
+  await ensureSchema()
+  await sql`DELETE FROM room_pending WHERE room_id = ${roomId} AND user_id = ${userId}`
 }
 
-// Get room info
-export function getRoomInfo(roomId: string): {
+export async function getRoomInfo(roomId: string): Promise<{
   exists: boolean
   adminId: string
   adminNickname: string
   userCount: number
   users: Array<{ id: string; nickname: string }>
   pendingUsers: Array<{ id: string; nickname: string; requestedAt: number }>
-} | null {
-  const room = activeRooms.get(roomId)
-  if (!room) {
-    return null
-  }
-  
+} | null> {
+  await ensureSchema()
+  const [room] = await sql`SELECT * FROM rooms WHERE id = ${roomId}`
+  if (!room) return null
+  const [users, pending] = await Promise.all([
+    sql`SELECT user_id, nickname FROM room_users WHERE room_id = ${roomId}`,
+    sql`SELECT user_id, nickname, requested_at FROM room_pending WHERE room_id = ${roomId}`,
+  ])
   return {
     exists: true,
-    adminId: room.adminId,
-    adminNickname: room.adminNickname,
-    userCount: room.users.size,
-    users: Array.from(room.users.values()).map(u => ({ id: u.id, nickname: u.nickname })),
-    pendingUsers: Array.from(room.pendingUsers.values()).map(u => ({ 
-      id: u.id, 
-      nickname: u.nickname, 
-      requestedAt: u.requestedAt 
-    })),
+    adminId: room.admin_id,
+    adminNickname: room.admin_nickname,
+    userCount: users.length,
+    users: users.map(u => ({ id: u.user_id, nickname: u.nickname })),
+    pendingUsers: pending.map(u => ({ id: u.user_id, nickname: u.nickname, requestedAt: Number(u.requested_at) })),
   }
 }
 
-// Check if user is admin
-export function isUserAdmin(roomId: string, userId: string): boolean {
-  const room = activeRooms.get(roomId)
-  return room?.adminId === userId
+export async function isUserAdmin(roomId: string, userId: string): Promise<boolean> {
+  await ensureSchema()
+  const [room] = await sql`SELECT admin_id FROM rooms WHERE id = ${roomId}`
+  return room?.admin_id === userId
 }
 
-// Check if user is a member
-export function isUserMember(roomId: string, userId: string): boolean {
-  const room = activeRooms.get(roomId)
-  return room?.users.has(userId) ?? false
+export async function isUserMember(roomId: string, userId: string): Promise<boolean> {
+  await ensureSchema()
+  const [row] = await sql`SELECT user_id FROM room_users WHERE room_id = ${roomId} AND user_id = ${userId}`
+  return !!row
 }
 
-// Check if user is pending
-export function isUserPending(roomId: string, userId: string): boolean {
-  const room = activeRooms.get(roomId)
-  return room?.pendingUsers.has(userId) ?? false
+export async function roomExists(roomId: string): Promise<boolean> {
+  await ensureSchema()
+  const [row] = await sql`SELECT id FROM rooms WHERE id = ${roomId}`
+  return !!row
 }
 
-// Check if room exists (for joining)
-export function roomExists(roomId: string): boolean {
-  return activeRooms.has(roomId)
-}
-
-// Get cooldown remaining time in seconds
-export function getCooldownRemaining(roomId: string): number {
-  cleanupCooldowns()
-  const cooldown = cooldownRooms.get(roomId)
-  if (!cooldown) {
+export async function getCooldownRemaining(roomId: string): Promise<number> {
+  await ensureSchema()
+  const [row] = await sql`SELECT cooldown_until FROM room_cooldowns WHERE id = ${roomId}`
+  if (!row) return 0
+  const remaining = Math.ceil((Number(row.cooldown_until) - Date.now()) / 1000)
+  if (remaining <= 0) {
+    await sql`DELETE FROM room_cooldowns WHERE id = ${roomId}`
     return 0
   }
-  return Math.max(0, Math.ceil((cooldown.cooldownUntil - Date.now()) / 1000))
+  return remaining
 }
 
-// Debug: dump all room state
-export function getRoomDebugInfo() {
+export async function getRoomDebugInfo() {
+  await ensureSchema()
+  const rooms = await sql`SELECT id FROM rooms`
+  const cooldowns = await sql`SELECT id FROM room_cooldowns`
   return {
-    activeRoomIds: Array.from(activeRooms.keys()),
-    cooldownRoomIds: Array.from(cooldownRooms.keys()),
-    globalActiveRoomIds: global.__activeRooms ? Array.from(global.__activeRooms.keys()) : null,
+    activeRoomIds: rooms.map(r => r.id),
+    cooldownRoomIds: cooldowns.map(r => r.id),
   }
 }
