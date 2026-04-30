@@ -43,9 +43,17 @@ async function ensureSchema() {
 }
 
 const COOLDOWN_MS = 5 * 60 * 1000
+const STALE_ROOM_MS = 30 * 60 * 1000 // 30 minutes
+
+async function cleanupStaleRooms() {
+  const cutoff = Date.now() - STALE_ROOM_MS
+  await sql`DELETE FROM rooms WHERE last_activity < ${cutoff}`
+  await sql`DELETE FROM room_cooldowns WHERE cooldown_until < ${Date.now()}`
+}
 
 export async function isRoomIdAvailable(roomId: string): Promise<boolean> {
   await ensureSchema()
+  await cleanupStaleRooms()
   const [roomRow] = await sql`SELECT id FROM rooms WHERE id = ${roomId}`
   if (roomRow) return false
   const [cooldown] = await sql`SELECT cooldown_until FROM room_cooldowns WHERE id = ${roomId}`
